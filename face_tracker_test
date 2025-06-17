@@ -1,0 +1,338 @@
+#this code is to have the turret detect and track your face using only the RGB camera.
+
+
+import cv2
+import numpy as np
+import RPi.GPIO as GPIO
+import time
+import threading
+import os
+from DRV8825 import DRV8825
+
+# Initialize stepper motors
+pan_motor = DRV8825(dir_pin=13, step_pin=19, enable_pin=12, mode_pins=(16, 17, 20))
+tilt_motor = DRV8825(dir_pin=24, step_pin=18, enable_pin=4, mode_pins=(21, 22, 27))
+
+# Configure both motors for 1/8 microstepping
+pan_motor.SetMicroStep('hardware', 'softward8')
+tilt_motor.SetMicroStep('hardware', 'softward8')
+
+# Camera setup
+camera = cv2.VideoCapture(0)
+if not camera.isOpened():
+    print("Error: Cannot open camera")
+    exit()
+
+# Load the face detector
+cascade_file = 'haarcascade_frontalface_default.xml'
+if not os.path.isfile(cascade_file):
+    print(f"Error: Cascade file '{cascade_file}' not found!")
+    exit()
+    
+face_cascade = cv2.CascadeClassifier(cascade_file)
+
+# Get actual camera resolution
+width = camera.get(cv2.CAP_PROP_FRAME_WIDTH)
+height = camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+center_x = int(width / 2)
+center_y = int(height / 2)
+print(f"Camera resolution: {width}x{height}")
+print(f"Center point: ({center_x}, {center_y})")
+
+# Control parameters
+deadband = 40            # Dead zone where no movement occurs
+motors_busy = False      # Flag to prevent simultaneous motor commands
+running = True           # Main loop control flag
+
+# Motor movement parameters - INCREASED SPEED
+pan_step_base = 5        # Base steps for pan motor (increased from 3)
+tilt_step_base = 4       # Base steps for tilt motor (increased from 2)
+step_delay = 0.002       # Reduced delay between steps (was 0.004)
+movement_delay = 0.05    # Reduced delay between movements (was 0.1)
+
+# SPEED MULTIPLIER - Higher value = faster movement
+speed_multiplier = 2.0   # Adjust this to increase/decrease speed
+
+# Motion smoothing
+motion_smoothing = 0.5   # Reduced for more responsive movement (was 0.6)
+
+# CRITICAL MOTOR DIRECTION SETTINGS
+# These worked after swapping motor connections
+pan_reverse = False      
+tilt_reverse = False     
+
+# Display settings
+display_width = 800      # Larger display width (default was around 640)
+display_height = 600     # Larger display height (default was around 480)
+
+def move_motor(motor, direction, steps):
+    """Move a motor a specific number of steps in a direction."""
+    global motors_busy
+    motors_busy = True
+    
+    # Debug print
+    motor_name = "PAN" if motor == pan_motor else "TILT"
+    print(f"Moving {motor_name} motor: {direction}, {steps} steps")
+    
+    # Execute movement
+    motor.TurnStep(Dir=direction, steps=steps, stepdelay=step_delay)
+    motor.Stop()
+    motors_busy = False
+
+def center_face(face_x, face_y):
+    """Move motors to center the face using objective coordinate-based movement."""
+    global motors_busy, speed_multiplier
+    
+    if motors_busy:
+        return
+    
+    # Calculate the vector from center to face
+    # These values tell us which way to move to center the face
+    x_vector = face_x - center_x
+    y_vector = face_y - center_y
+    
+    # Skip small movements (within deadband)
+    if abs(x_vector) <= deadband and abs(y_vector) <= deadband:
+        return
+    
+    # Calculate steps based on distance from center - SPEED ENHANCED
+    # More aggressive scaling based on distance
+    pan_steps = min(max(pan_step_base, int(abs(x_vector) * 0.15 * speed_multiplier)), 20)
+    tilt_steps = min(max(tilt_step_base, int(abs(y_vector) * 0.15 * speed_multiplier)), 16)
+    
+    # Determine pan direction
+    # If x_vector is positive, face is to the right of center
+    # If pan_reverse is False, moving 'forward' should move camera right
+    if x_vector > 0:  # Face is right of center, need to move camera right
+        pan_direction = 'backward' if pan_reverse else 'forward'
+    else:  # Face is left of center, need to move camera left
+        pan_direction = 'forward' if pan_reverse else 'backward'
+    
+    # Determine tilt direction
+    # If y_vector is positive, face is below center
+    # If tilt_reverse is False, moving 'forward' should move camera down
+    if y_vector > 0:  # Face is below center, need to move camera down
+        tilt_direction = 'backward' if tilt_reverse else 'forward'
+    else:  # Face is above center, need to move camera up
+        tilt_direction = 'forward' if tilt_reverse else 'backward'
+    
+    # Create threads for simultaneous motor movement
+    threads = []
+    
+    # Only move pan if needed
+    if abs(x_vector) > deadband:
+        pan_thread = threading.Thread(
+            target=move_motor, 
+            args=(pan_motor, pan_direction, pan_steps)
+        )
+        threads.append(pan_thread)
+        pan_thread.start()
+    
+    # Only move tilt if needed
+    if abs(y_vector) > deadband:
+        tilt_thread = threading.Thread(
+            target=move_motor, 
+            args=(tilt_motor, tilt_direction, tilt_steps)
+        )
+        threads.append(tilt_thread)
+        tilt_thread.start()
+    
+    # Wait for movements to complete
+    for thread in threads:
+        thread.join()
+    
+    # Small delay to allow system to stabilize
+    if threads:
+        time.sleep(movement_delay)
+
+def main():
+    """Main face tracking loop."""
+    global running, motors_busy, pan_reverse, tilt_reverse, speed_multiplier
+    
+    # Create window with specific size
+    cv2.namedWindow("Face Tracking", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Face Tracking", display_width, display_height)
+    
+    # Variables for face position tracking
+    last_face_x = center_x
+    last_face_y = center_y
+    valid_face_memory = []
+    face_detected = False
+    current_setup = 0  # To track which direction setup we're using
+    
+    # Different direction configurations to try
+    direction_setups = [
+        (False, False),  # Neither reversed
+        (True, False),   # Pan reversed only
+        (False, True),   # Tilt reversed only
+        (True, True)     # Both reversed
+    ]
+    
+    # Initialize with first setup
+    pan_reverse, tilt_reverse = direction_setups[current_setup]
+    
+    print("=== FACE TRACKING STARTED ===")
+    print("Press 'q' to quit")
+    print("Press 'r' to reset tracking")
+    print("Press 'c' to cycle through direction combinations")
+    print("Press '+' to increase motor speed")
+    print("Press '-' to decrease motor speed")
+    print(f"Current settings: PAN_REVERSE={pan_reverse}, TILT_REVERSE={tilt_reverse}")
+    print(f"Speed multiplier: {speed_multiplier}x")
+    
+    try:
+        while running:
+            # Capture frame
+            ret, frame = camera.read()
+            if not ret:
+                print("Failed to grab frame")
+                break
+            
+            # Get frame dimensions
+            frame_height, frame_width = frame.shape[:2]
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Apply histogram equalization for better detection in varying lighting
+            gray = cv2.equalizeHist(gray)
+            
+            # Detect faces
+            faces = face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=7,
+                minSize=(80, 80),  # Larger minimum size for better detection
+                flags=cv2.CASCADE_SCALE_IMAGE
+            )
+            
+            # Process detected faces
+            if len(faces) > 0:
+                # Sort faces by area (largest first)
+                faces = sorted(faces, key=lambda x: x[2] * x[3], reverse=True)
+                
+                # Use largest face
+                x, y, w, h = faces[0]
+                
+                # Calculate face center
+                face_center_x = x + w // 2
+                face_center_y = y + h // 2
+                
+                # Add to position memory for stability
+                valid_face_memory.append((face_center_x, face_center_y))
+                if len(valid_face_memory) > 3:  # Keep last 3 positions
+                    valid_face_memory.pop(0)
+                
+                # Calculate average position
+                avg_x = sum(pos[0] for pos in valid_face_memory) // len(valid_face_memory)
+                avg_y = sum(pos[1] for pos in valid_face_memory) // len(valid_face_memory)
+                
+                # Apply smoothing
+                if face_detected:
+                    tracking_x = int(motion_smoothing * last_face_x + (1 - motion_smoothing) * avg_x)
+                    tracking_y = int(motion_smoothing * last_face_y + (1 - motion_smoothing) * avg_y)
+                else:
+                    tracking_x = avg_x
+                    tracking_y = avg_y
+                
+                # Update for next frame
+                last_face_x = tracking_x
+                last_face_y = tracking_y
+                face_detected = True
+                
+                # Draw face rectangle
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                
+                # Draw tracking point (red dot = face center)
+                cv2.circle(frame, (tracking_x, tracking_y), 5, (0, 0, 255), -1)
+                
+                # Draw center point (blue dot = where we want the face to be)
+                cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
+                
+                # Draw deadband zone
+                cv2.rectangle(frame, 
+                             (center_x - deadband, center_y - deadband),
+                             (center_x + deadband, center_y + deadband),
+                             (255, 255, 0), 1)
+                
+                # Display movement vector
+                if not motors_busy:
+                    # Calculate vector
+                    x_vector = tracking_x - center_x
+                    y_vector = tracking_y - center_y
+                    
+                    # Draw vector
+                    if abs(x_vector) > deadband or abs(y_vector) > deadband:
+                        cv2.arrowedLine(frame, (center_x, center_y), 
+                                       (tracking_x, tracking_y), 
+                                       (0, 255, 255), 2)
+                
+                # Status info
+                cv2.putText(frame, "TRACKING", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Move camera to center the face if not busy
+                if not motors_busy:
+                    center_face(tracking_x, tracking_y)
+            else:
+                # No face detected
+                face_detected = False
+                cv2.putText(frame, "NO FACE", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Add direction settings info
+            cv2.putText(frame, f"Pan Reverse: {pan_reverse}, Tilt Reverse: {tilt_reverse}", 
+                       (10, frame_height - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Add speed info
+            cv2.putText(frame, f"Speed: {speed_multiplier:.1f}x (+/- to change)", 
+                       (10, frame_height - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Add controls info
+            cv2.putText(frame, "q:quit r:reset c:cycle directions", 
+                       (10, frame_height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+            # Display frame
+            cv2.imshow('Face Tracking', frame)
+            
+            # Check for key presses
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                running = False
+                break
+            elif key == ord('r'):
+                # Reset tracking
+                face_detected = False
+                valid_face_memory.clear()
+                print("Tracking reset")
+            elif key == ord('c'):
+                # Cycle through direction configurations
+                current_setup = (current_setup + 1) % len(direction_setups)
+                pan_reverse, tilt_reverse = direction_setups[current_setup]
+                print(f"Switched to setup {current_setup + 1}/{len(direction_setups)}")
+                print(f"PAN_REVERSE={pan_reverse}, TILT_REVERSE={tilt_reverse}")
+            elif key == ord('+') or key == ord('='):
+                # Increase speed
+                speed_multiplier += 0.2
+                print(f"Speed increased to {speed_multiplier:.1f}x")
+            elif key == ord('-') or key == ord('_'):
+                # Decrease speed
+                speed_multiplier = max(0.5, speed_multiplier - 0.2)
+                print(f"Speed decreased to {speed_multiplier:.1f}x")
+                
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Cleanup
+        print("Cleaning up...")
+        camera.release()
+        cv2.destroyAllWindows()
+        pan_motor.Stop()
+        tilt_motor.Stop()
+        GPIO.cleanup()
+        print("Cleanup complete")
+
+if __name__ == "__main__":
+    main()
