@@ -1,0 +1,24 @@
+#this simple code is to see the lumen readings from the lumen sensor. 
+
+import board
+import busio
+import adafruit_veml7700
+import time
+
+# Initialize I2C bus and sensor
+try:
+    i2c = busio.I2C(board.SCL, board.SDA)
+    sensor = adafruit_veml7700.VEML7700(i2c)
+    print("✅ VEML7700 sensor initialized successfully!")
+
+    # Print sensor settings for debugging
+    print(f"🌞 Gain: {sensor.light_gain}")
+
+    # Continuous reading loop
+    while True:
+        lux = sensor.lux
+        print(f"💡 Ambient Light: {lux:.2f} lux")
+        time.sleep(1)
+
+except Exception as e:
+    print(f"❌ Error initializing or reading from VEML7700: {e}")
