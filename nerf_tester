@@ -1,0 +1,57 @@
+#this code shoots the nerf gun once
+#the code will spin the fly wheel for three seconds to build up speed
+#followed by firing the piston once to move one dart into the flywheel
+
+import RPi.GPIO as GPIO
+import time
+
+# Define GPIO pins based on your connections
+FLYWHEEL_PIN = 18  # Connected to Relay 1 (Left)
+TRIGGER_PIN = 17   # Connected to Relay 2 (Right)
+
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(FLYWHEEL_PIN, GPIO.OUT)
+GPIO.setup(TRIGGER_PIN, GPIO.OUT)
+
+# Initialize pins to HIGH (relays inactive for active LOW modules)
+GPIO.output(FLYWHEEL_PIN, GPIO.HIGH)  # HIGH = relay OFF
+GPIO.output(TRIGGER_PIN, GPIO.HIGH)   # HIGH = relay OFF
+
+try:
+    print("Nerf Gun Single Shot Sequence")
+    print("============================")
+    
+    # Step 1: Start ONLY the flywheel by setting its pin LOW
+    print("Starting flywheel ONLY...")
+    GPIO.output(FLYWHEEL_PIN, GPIO.LOW)  # LOW = relay ON
+    GPIO.output(TRIGGER_PIN, GPIO.HIGH)  # Ensure trigger is OFF
+    
+    # Step 2: Let flywheel run alone for 2 seconds
+    print("Letting flywheel run alone for 2 seconds...")
+    time.sleep(2.0)
+    
+    # Step 3: Now activate the trigger while keeping flywheel on
+    print("Activating trigger briefly...")
+    GPIO.output(TRIGGER_PIN, GPIO.LOW)   # LOW = relay ON
+    
+    # Step 4: Keep both on for 0.2 seconds
+    time.sleep(0.2)
+    
+    # Step 5: Turn OFF both simultaneously by setting pins HIGH
+    print("Turning off BOTH simultaneously...")
+    GPIO.output(FLYWHEEL_PIN, GPIO.HIGH)  # HIGH = relay OFF
+    GPIO.output(TRIGGER_PIN, GPIO.HIGH)   # HIGH = relay OFF
+    
+    print("Sequence complete!")
+
+except KeyboardInterrupt:
+    # Emergency stop
+    GPIO.output(FLYWHEEL_PIN, GPIO.HIGH)  # HIGH = relay OFF
+    GPIO.output(TRIGGER_PIN, GPIO.HIGH)   # HIGH = relay OFF
+    print("Emergency stop triggered")
+
+finally:
+    # Clean up
+    GPIO.cleanup()
+    print("GPIO cleanup complete")
