@@ -1,0 +1,78 @@
+#This code is for the adaptable RGB-LWIR fusion sensor on the turret. 
+#this code relies on the ammount of light hitting the lumen sensor to adjust the fusion
+
+import cv2
+import numpy as np
+
+# Open the FLIR (thermal) and USB (RGB) video streams
+flir_cap = cv2.VideoCapture('/dev/video0')  # FLIR on /dev/video0
+rgb_cap = cv2.VideoCapture('/dev/video2')   # USB webcam on /dev/video2
+
+def nothing(x):
+    pass
+
+# Create window and trackbars for adjustment
+cv2.namedWindow('Fused Video')
+cv2.createTrackbar('Scale X%', 'Fused Video', 100, 200, nothing)
+cv2.createTrackbar('Scale Y%', 'Fused Video', 100, 200, nothing)
+cv2.createTrackbar('Offset X', 'Fused Video', 100, 200, nothing)
+cv2.createTrackbar('Offset Y', 'Fused Video', 100, 200, nothing)
+cv2.createTrackbar('LWIR Alpha %', 'Fused Video', 50, 100, nothing)
+
+while True:
+    ret_flir, flir_frame = flir_cap.read()
+    ret_rgb, rgb_frame = rgb_cap.read()
+    
+    if not ret_flir or not ret_rgb:
+        print("Failed to grab frame from one or both cameras")
+        break
+
+    # Get current trackbar positions
+    scale_x = cv2.getTrackbarPos('Scale X%', 'Fused Video') / 100.0
+    scale_y = cv2.getTrackbarPos('Scale Y%', 'Fused Video') / 100.0
+    offset_x = cv2.getTrackbarPos('Offset X', 'Fused Video') - 100
+    offset_y = cv2.getTrackbarPos('Offset Y', 'Fused Video') - 100
+    lwir_alpha = cv2.getTrackbarPos('LWIR Alpha %', 'Fused Video')
+
+    if lwir_alpha == 0:
+        # Show only RGB frame, no processing
+        cv2.imshow('Fused Video', rgb_frame)
+    else:
+        # Process FLIR frame
+        new_width = int(rgb_frame.shape[1] * scale_x)
+        new_height = int(rgb_frame.shape[0] * scale_y)
+        
+        flir_frame_resized = cv2.resize(flir_frame, (new_width, new_height))
+        M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+        flir_frame_translated = cv2.warpAffine(flir_frame_resized, M, (rgb_frame.shape[1], rgb_frame.shape[0]))
+        
+        # Convert to 4 channel (BGRA) for alpha blending
+        rgb_bgra = cv2.cvtColor(rgb_frame, cv2.COLOR_BGR2BGRA)
+        flir_bgra = cv2.cvtColor(flir_frame_translated, cv2.COLOR_BGR2BGRA)
+        
+        # Set alpha channel for FLIR image
+        flir_bgra[:, :, 3] = lwir_alpha * 2.55  # Convert 0-100 to 0-255
+        
+        # Blend using alpha channel
+        foreground = flir_bgra.astype(float)
+        background = rgb_bgra.astype(float)
+        
+        # Create alpha channels
+        alpha = foreground[:, :, 3] / 255.0
+        alpha = np.dstack((alpha, alpha, alpha, alpha))
+        
+        # Blend
+        foreground = cv2.multiply(alpha, foreground)
+        background = cv2.multiply(1.0 - alpha, background)
+        out_frame = cv2.add(foreground, background)
+        
+        # Convert back to BGR for display
+        display_frame = cv2.cvtColor(out_frame.astype(np.uint8), cv2.COLOR_BGRA2BGR)
+        cv2.imshow('Fused Video', display_frame)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+flir_cap.release()
+rgb_cap.release()
+cv2.destroyAllWindows()
