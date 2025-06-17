@@ -1,0 +1,102 @@
+#this code is to test the rangefinder on the turret
+#the rangefinder can be used to measure distance to the target object
+#for long range shots, the rangefinder can be used to help arc the nerf gun shot 
+
+import serial
+import time
+
+# SF30 configuration
+SERIAL_PORT = '/dev/ttyAMA0'
+BAUD_RATE = 115200
+
+# Reading frequency
+READING_INTERVAL = 0.5  # Seconds between readings (2Hz)
+
+# Configure the serial port
+try:
+    ser = serial.Serial(
+        port=SERIAL_PORT,
+        baudrate=BAUD_RATE,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        bytesize=serial.EIGHTBITS,
+        timeout=1
+    )
+    print(f"Connected to SF30 on {SERIAL_PORT} at {BAUD_RATE} baud")
+    ser.reset_input_buffer()
+except serial.SerialException as e:
+    print(f"Error opening serial port: {e}")
+    exit(1)
+
+def parse_distance(high_byte, low_byte):
+    """Parse SF30 distance data according to the manual format"""
+    # Check if format matches (high byte MSB set, low byte MSB not set)
+    if (high_byte & 0x80) and not (low_byte & 0x80):
+        # Extract the 14-bit distance value (7 bits from each byte)
+        distance_cm = ((high_byte & 0x7F) << 7) | (low_byte & 0x7F)
+        return distance_cm / 100.0  # Convert to meters
+    return None
+
+def get_latest_reading():
+    """Get the latest distance reading from the SF30"""
+    # Clear any old data
+    ser.reset_input_buffer()
+    
+    # Wait for new data to arrive
+    time.sleep(0.1)
+    
+    # Look for a valid reading
+    start_time = time.time()
+    while (time.time() - start_time) < 0.3:  # Try for up to 300ms
+        if ser.in_waiting >= 2:
+            # Collect all available data
+            data = ser.read(ser.in_waiting)
+            
+            # Process the data in pairs, starting from the end (latest data)
+            for i in range(len(data) - 2, -1, -2):
+                if i + 1 < len(data):  # Ensure we have a pair
+                    high_byte = data[i]
+                    low_byte = data[i+1]
+                    
+                    # Parse the distance
+                    distance = parse_distance(high_byte, low_byte)
+                    if distance is not None:
+                        return distance
+        
+        time.sleep(0.01)  # Short wait before checking again
+    
+    return None  # No valid reading found
+
+try:
+    print("Reading SF30 distance data at 2Hz (every 0.5 seconds)")
+    print("Press Ctrl+C to exit.")
+    print("-" * 40)
+    
+    next_reading_time = time.time()
+    
+    # Main reading loop
+    while True:
+        current_time = time.time()
+        
+        # Check if it's time for the next reading
+        if current_time >= next_reading_time:
+            # Get distance measurement
+            distance = get_latest_reading()
+            
+            # Display the result
+            if distance is not None:
+                print(f"Distance: {distance:.2f} meters")
+            else:
+                print("No valid reading")
+            
+            # Set time for next reading
+            next_reading_time = current_time + READING_INTERVAL
+        
+        # Small sleep to prevent CPU hogging
+        time.sleep(0.01)
+        
+except KeyboardInterrupt:
+    print("\nReading stopped by user")
+finally:
+    ser.close()
+    print("Serial port closed")
