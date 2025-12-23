@@ -39,7 +39,7 @@ center_y = int(height / 2)
 print(f"Camera resolution: {width}x{height}")
 print(f"Center point: ({center_x}, {center_y})")
 
-# Control parameters
+# Control parameters for movement
 deadband = 40            # Dead zone where no movement occurs
 motors_busy = False      # Flag to prevent simultaneous motor commands
 running = True           # Main loop control flag
